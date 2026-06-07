@@ -91,12 +91,12 @@ export default function Home() {
           </h1>
           
           <p className="text-slate-400 text-sm md:text-base font-medium tracking-wide mt-4 max-w-sm">
-            Roll the dice, choose your lucky color, and play Ludo with players globally!
+            Roll the dice, choose your lucky color, and play Ludo with friends locally or online!
           </p>
         </div>
 
-        {/* 3. GAME MODES (FLASHY LUDO CLUB CARDS) */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 w-full max-w-3xl px-4">
+        {/* 3. GAME MODES (FLASHY LUDO CARDS) */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full max-w-2xl px-4">
           
           {/* Local Pass & Play */}
           <Link href="/local" className="group">
@@ -141,31 +141,7 @@ export default function Home() {
                   With Friends
                 </h3>
                 <p className="text-green-100 text-xs mt-1 font-medium opacity-90 leading-tight">
-                  Create private rooms & share session codes
-                </p>
-              </div>
-            </motion.div>
-          </Link>
-
-          {/* Play Online Matchmaking */}
-          <Link href="/online" className="group">
-            <motion.div
-              whileHover={{ scale: 1.05, y: -5 }}
-              whileTap={{ scale: 0.98 }}
-              className="bg-gradient-to-b from-blue-500 to-blue-700 border-2 border-blue-400/50 p-6 rounded-3xl text-center shadow-xl shadow-blue-950/40 cursor-pointer relative overflow-hidden flex flex-col items-center gap-4 h-full"
-            >
-              <div className="absolute inset-0 bg-gradient-to-t from-transparent via-white/10 to-white/20 pointer-events-none" />
-              
-              <div className="w-16 h-16 rounded-2xl bg-white flex items-center justify-center shadow-md transform group-hover:-rotate-12 transition-transform duration-300">
-                <Globe className="w-8 h-8 text-blue-600" />
-              </div>
-              
-              <div>
-                <h3 className="font-fredoka text-xl font-black text-white uppercase tracking-wider">
-                  Play Online
-                </h3>
-                <p className="text-blue-100 text-xs mt-1 font-medium opacity-90 leading-tight">
-                  Match instantly with random players worldwide
+                  Create private rooms & share dynamic invite links
                 </p>
               </div>
             </motion.div>

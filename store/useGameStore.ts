@@ -2,9 +2,8 @@ import { create } from "zustand";
 import { Player, PlayerColor, Piece } from "@/game/types";
 import { createPlayers } from "@/game/engine";
 import { rollDice, getValidMoves } from "@/game/rules";
-import { nextTurn, getPieceCoordinate } from "@/game/helpers";
+import { getPieceCoordinate } from "@/game/helpers";
 import { START_INDEX, SAFE_CELLS } from "@/game/constants";
-import { io, Socket } from "socket.io-client";
 import confetti from "canvas-confetti";
 
 export interface ConnectedPlayer {
@@ -27,7 +26,6 @@ interface GameState {
   isMovingPiece: boolean; // Locks controls during step-by-step animations
 
   // Multiplayer fields
-  socket: Socket | null;
   roomCode: string | null;
   myColor: PlayerColor | null; // Null in local play
   myId: string | null;
@@ -37,76 +35,60 @@ interface GameState {
 
   // Actions
   initGame: (mode: "local" | "friends" | "online") => void;
-  joinFriendRoom: (code: string) => void;
-  createFriendRoom: () => void;
-  startMatchmaking: () => void;
-  cancelMatchmaking: () => void;
+  connectRoom: (code: string) => Promise<void>;
+  createFriendRoom: () => Promise<void>;
+  joinFriendRoom: (code: string) => Promise<void>;
   chooseColor: (color: PlayerColor) => void;
   startGame: () => void;
   roll: (forcedValue?: number) => void;
   movePiece: (pieceId: string, isRemote?: boolean) => Promise<void>;
   resetGame: () => void;
-  disconnectSocket: () => void;
+  disconnectSocket: () => void; // Keeps compatibility with existing interfaces
   addLog: (log: string) => void;
 }
 
-const SOCKET_SERVER_URL = "http://localhost:3001";
+// Module-level variables for PeerJS connection state (non-serializable state)
+let peerInstance: any = null;
+let clientConnections: { color: PlayerColor; conn: any; peerId: string }[] = [];
+let hostConnection: any = null;
+
+function generateRoomCode(): string {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  let code = "";
+  for (let i = 0; i < 6; i++) {
+    code += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return code;
+}
+
+function getNextActiveTurn(
+  current: PlayerColor,
+  gameMode: string,
+  connectedPlayers: ConnectedPlayer[]
+): PlayerColor {
+  if (gameMode === "local") {
+    const order: PlayerColor[] = ["red", "green", "yellow", "blue"];
+    const index = order.indexOf(current);
+    return order[(index + 1) % 4];
+  }
+
+  // Filter standard order to only active colors in the lobby
+  const activeColors = ["red", "green", "yellow", "blue"].filter((color) =>
+    connectedPlayers.some((p) => p.color === color)
+  ) as PlayerColor[];
+
+  if (activeColors.length === 0) {
+    return current;
+  }
+
+  const index = activeColors.indexOf(current);
+  if (index === -1) {
+    return activeColors[0];
+  }
+  return activeColors[(index + 1) % activeColors.length];
+}
 
 export const useGameStore = create<GameState>((set, get) => {
-  // Setup socket listener
-  const setupSocketListeners = (socket: Socket) => {
-    socket.on("room-details", ({ roomCode, players: activePlayers, color, myId, ownerId }) => {
-      set({
-        roomCode,
-        myColor: color,
-        myId,
-        roomOwnerId: ownerId,
-        connectedPlayers: activePlayers,
-        gameStarted: false, // Wait for manual start in private lobbies
-      });
-      get().addLog(`Joined room ${roomCode} as ${color}`);
-    });
-
-    socket.on("player-list-update", ({ players, ownerId }) => {
-      // Find own updated color
-      const { socket: currentSocket } = get();
-      const me = players.find((p: any) => p.id === currentSocket?.id);
-      
-      set({
-        connectedPlayers: players,
-        roomOwnerId: ownerId || get().roomOwnerId,
-        myColor: me ? me.color : get().myColor,
-      });
-    });
-
-    socket.on("game-start", () => {
-      set({
-        gameStarted: true,
-        players: createPlayers(),
-        currentTurn: "red",
-        winner: null,
-      });
-      get().addLog("Game started!");
-    });
-
-    socket.on("opponent-roll", ({ value }) => {
-      get().roll(value);
-    });
-
-    socket.on("opponent-move", ({ pieceId }) => {
-      get().movePiece(pieceId, true);
-    });
-
-    socket.on("matchmaking-success", ({ roomCode }) => {
-      set({ onlineQueueState: "matched" });
-      socket.emit("join-room", { roomCode });
-    });
-
-    socket.on("error", ({ message }) => {
-      get().addLog(`[Error] ${message}`);
-    });
-  };
-
   return {
     players: createPlayers(),
     currentTurn: "red",
@@ -119,7 +101,6 @@ export const useGameStore = create<GameState>((set, get) => {
     gameStarted: false,
     isMovingPiece: false,
 
-    socket: null,
     roomCode: null,
     myColor: null,
     myId: null,
@@ -132,18 +113,33 @@ export const useGameStore = create<GameState>((set, get) => {
     },
 
     disconnectSocket: () => {
-      const { socket } = get();
-      if (socket) {
-        socket.disconnect();
-        set({
-          socket: null,
-          roomCode: null,
-          myColor: null,
-          myId: null,
-          roomOwnerId: null,
-          connectedPlayers: [],
-        });
+      if (peerInstance) {
+        try {
+          peerInstance.destroy();
+        } catch (e) {
+          console.error(e);
+        }
+        peerInstance = null;
       }
+      clientConnections.forEach((c) => {
+        try {
+          c.conn.close();
+        } catch (e) {}
+      });
+      clientConnections = [];
+      if (hostConnection) {
+        try {
+          hostConnection.close();
+        } catch (e) {}
+        hostConnection = null;
+      }
+      set({
+        roomCode: null,
+        myColor: null,
+        myId: null,
+        roomOwnerId: null,
+        connectedPlayers: [],
+      });
     },
 
     initGame: (mode) => {
@@ -163,91 +159,291 @@ export const useGameStore = create<GameState>((set, get) => {
           history: ["Local game started!"],
         });
       } else {
-        // Online or Friends mode setup
-        const socket = io(SOCKET_SERVER_URL);
         set({
-          gameMode: mode,
-          socket,
+          gameMode: "friends",
           players: createPlayers(),
           winner: null,
           isMovingPiece: false,
-          history: [`Connecting to multiplayer server...`],
+          history: ["Select host or enter room code to connect."],
         });
-        setupSocketListeners(socket);
       }
     },
 
-    createFriendRoom: () => {
-      const { socket } = get();
-      if (socket) {
-        socket.emit("create-room");
-      }
+    createFriendRoom: async () => {
+      const code = generateRoomCode();
+      sessionStorage.setItem(`host-room-${code}`, "true");
+      set({ roomCode: code });
     },
 
-    joinFriendRoom: (code) => {
-      const { socket } = get();
-      if (socket) {
-        socket.emit("join-room", { roomCode: code.toUpperCase() });
-      }
+    joinFriendRoom: async (code) => {
+      const formattedCode = code.toUpperCase().trim();
+      sessionStorage.setItem(`host-room-${formattedCode}`, "false");
+      set({ roomCode: formattedCode });
     },
 
-    startMatchmaking: () => {
-      const { socket } = get();
-      if (socket) {
-        set({ onlineQueueState: "searching" });
-        socket.emit("join-queue");
-        get().addLog("Searching for matchmaking players...");
-      }
-    },
+    connectRoom: async (code) => {
+      const formattedCode = code.toUpperCase().trim();
+      const isHost = sessionStorage.getItem(`host-room-${formattedCode}`) === "true";
 
-    cancelMatchmaking: () => {
-      const { socket } = get();
-      if (socket) {
-        socket.emit("leave-queue");
-        set({ onlineQueueState: "idle" });
-        get().addLog("Matchmaking queue cancelled.");
+      get().disconnectSocket();
+
+      const { Peer } = await import("peerjs");
+
+      if (isHost) {
+        // Owner/Host connection listener
+        const peer = new Peer(formattedCode);
+        peerInstance = peer;
+
+        peer.on("open", (id) => {
+          set({
+            gameMode: "friends",
+            roomCode: formattedCode,
+            myColor: "red",
+            myId: id,
+            roomOwnerId: id,
+            connectedPlayers: [{ id, color: "red", isOwner: true }],
+            gameStarted: false,
+          });
+          get().addLog(`Lobby created! Room Code: ${formattedCode}`);
+        });
+
+        peer.on("connection", (conn) => {
+          conn.on("open", () => {
+            conn.on("data", (data: any) => {
+              if (data.type === "join") {
+                const peerId = data.peerId;
+                const currentPlayers = get().connectedPlayers;
+
+                // Assign first available color
+                const takenColors = currentPlayers.map((p) => p.color);
+                const availableColor = (["red", "green", "yellow", "blue"] as PlayerColor[]).find(
+                  (c) => !takenColors.includes(c)
+                );
+
+                if (!availableColor || currentPlayers.length >= 4) {
+                  conn.send({ type: "error", message: "Room is full." });
+                  conn.close();
+                  return;
+                }
+
+                clientConnections.push({ color: availableColor, conn, peerId });
+
+                const newPlayersList = [
+                  ...currentPlayers,
+                  { id: peerId, color: availableColor, isOwner: false },
+                ];
+
+                set({ connectedPlayers: newPlayersList });
+
+                // Welcome client & sync list
+                conn.send({
+                  type: "welcome",
+                  color: availableColor,
+                  players: newPlayersList,
+                  ownerId: peer.id,
+                });
+
+                // Broadcast new list to all other clients
+                clientConnections.forEach((client) => {
+                  if (client.peerId !== peerId) {
+                    client.conn.send({
+                      type: "player-list-update",
+                      players: newPlayersList,
+                      ownerId: peer.id,
+                    });
+                  }
+                });
+
+                get().addLog(`Player joined lobby as ${availableColor.toUpperCase()}`);
+              } else if (data.type === "choose-color") {
+                const isTaken = get().connectedPlayers.some((p) => p.color === data.color);
+                if (isTaken) return;
+
+                const newPlayers = get().connectedPlayers.map((p) =>
+                  p.id === conn.peer ? { ...p, color: data.color } : p
+                );
+
+                const assoc = clientConnections.find((c) => c.peerId === conn.peer);
+                if (assoc) assoc.color = data.color;
+
+                set({ connectedPlayers: newPlayers });
+
+                // Broadcast updated player list
+                clientConnections.forEach((client) => {
+                  client.conn.send({
+                    type: "player-list-update",
+                    players: newPlayers,
+                    ownerId: peer.id,
+                  });
+                });
+              } else if (data.type === "roll") {
+                get().roll(data.value);
+                // Broadcast to other clients
+                clientConnections.forEach((client) => {
+                  if (client.peerId !== conn.peer) {
+                    client.conn.send({ type: "roll", value: data.value });
+                  }
+                });
+              } else if (data.type === "move") {
+                get().movePiece(data.pieceId, true);
+                // Broadcast to other clients
+                clientConnections.forEach((client) => {
+                  if (client.peerId !== conn.peer) {
+                    client.conn.send({ type: "move", pieceId: data.pieceId });
+                  }
+                });
+              }
+            });
+
+            conn.on("close", () => {
+              const remainingPlayers = get().connectedPlayers.filter((p) => p.id !== conn.peer);
+              clientConnections = clientConnections.filter((c) => c.peerId !== conn.peer);
+              set({ connectedPlayers: remainingPlayers });
+
+              // Broadcast new list to remaining clients
+              clientConnections.forEach((client) => {
+                client.conn.send({
+                  type: "player-list-update",
+                  players: remainingPlayers,
+                  ownerId: peer.id,
+                });
+              });
+              get().addLog("A player disconnected.");
+            });
+          });
+        });
+
+        peer.on("error", (err) => {
+          get().addLog(`[Error] Lobby initialization failed: ${err.message}`);
+        });
+      } else {
+        // Guest/Client connection setup
+        const peer = new Peer();
+        peerInstance = peer;
+
+        peer.on("open", (id) => {
+          const conn = peer.connect(formattedCode);
+          hostConnection = conn;
+
+          conn.on("open", () => {
+            conn.send({ type: "join", peerId: id });
+          });
+
+          conn.on("data", (data: any) => {
+            if (data.type === "welcome") {
+              set({
+                gameMode: "friends",
+                roomCode: formattedCode,
+                myColor: data.color,
+                myId: id,
+                roomOwnerId: data.ownerId,
+                connectedPlayers: data.players,
+                gameStarted: false,
+              });
+              get().addLog(`Connected to room ${formattedCode} as ${data.color.toUpperCase()}`);
+            } else if (data.type === "player-list-update") {
+              set({
+                connectedPlayers: data.players,
+                roomOwnerId: data.ownerId,
+              });
+            } else if (data.type === "game-start") {
+              set({
+                gameStarted: true,
+                players: createPlayers(),
+                currentTurn: data.startingTurn,
+                winner: null,
+              });
+              get().addLog(`Game started! Starting turn: ${data.startingTurn.toUpperCase()}`);
+            } else if (data.type === "roll") {
+              get().roll(data.value);
+            } else if (data.type === "move") {
+              get().movePiece(data.pieceId, true);
+            } else if (data.type === "error") {
+              get().addLog(`[Error] Connection rejected: ${data.message}`);
+            }
+          });
+
+          conn.on("close", () => {
+            get().addLog("Lobby connection closed.");
+            get().resetGame();
+          });
+        });
+
+        peer.on("error", (err) => {
+          get().addLog(`[Error] Connection failed: ${err.message}`);
+        });
       }
     },
 
     chooseColor: (color) => {
-      const { socket, roomCode } = get();
-      if (socket && roomCode) {
-        socket.emit("choose-color", { roomCode, color });
+      const { gameMode, connectedPlayers, myId } = get();
+
+      if (gameMode !== "local" && !hostConnection) {
+        // Host locally updates and broadcasts
+        const isTaken = connectedPlayers.some((p) => p.color === color);
+        if (isTaken) return;
+
+        const newPlayers = connectedPlayers.map((p) => (p.id === myId ? { ...p, color } : p));
+        set({ connectedPlayers: newPlayers, myColor: color });
+
+        clientConnections.forEach((client) => {
+          client.conn.send({ type: "player-list-update", players: newPlayers, ownerId: myId });
+        });
+      } else if (hostConnection) {
+        // Client requests color change from host
+        hostConnection.send({ type: "choose-color", color });
       }
     },
 
     startGame: () => {
-      const { socket, roomCode } = get();
-      if (socket && roomCode) {
-        socket.emit("start-game", { roomCode });
+      const { gameMode, connectedPlayers, myId } = get();
+      if (gameMode !== "local" && !hostConnection) {
+        const activeColors = ["red", "green", "yellow", "blue"].filter((color) =>
+          connectedPlayers.some((p) => p.color === color)
+        ) as PlayerColor[];
+        const startingTurn = activeColors.length > 0 ? activeColors[0] : "red";
+
+        set({
+          gameStarted: true,
+          players: createPlayers(),
+          currentTurn: startingTurn,
+          winner: null,
+        });
+        get().addLog(`Game started! Starting turn: ${startingTurn.toUpperCase()}`);
+
+        clientConnections.forEach((client) => {
+          client.conn.send({ type: "game-start", startingTurn });
+        });
       }
     },
 
     roll: (forcedValue) => {
-      const { diceState, currentTurn, myColor, gameMode, socket, roomCode, players, isMovingPiece } = get();
+      const { diceState, currentTurn, myColor, gameMode, isMovingPiece, connectedPlayers } = get();
 
-      // Ensure game is started, and dice is idle, and no piece is moving
       if (diceState !== "idle" || isMovingPiece) return;
 
-      // In online/friends mode, only the turn player can roll
       if (gameMode !== "local" && myColor !== currentTurn && forcedValue === undefined) {
         return;
       }
 
       set({ diceState: "rolling" });
 
-      // Simulate dice animation duration
       setTimeout(() => {
-        // Check if the current player needs a 6 to start moving (no active pieces currently on the board)
-        const playerObj = players.find((p) => p.color === currentTurn);
+        const playerObj = get().players.find((p) => p.color === currentTurn);
         const hasPiecesOnBoard = playerObj?.pieces.some((p) => p.position >= 0 && !p.finished);
         const needsSix = !hasPiecesOnBoard;
 
         const value = forcedValue !== undefined ? forcedValue : rollDice(needsSix);
 
-        // If it's a local roll in multiplayer, broadcast it
-        if (gameMode !== "local" && forcedValue === undefined && socket && roomCode) {
-          socket.emit("roll", { roomCode, value });
+        // Broadcast if local roll
+        if (gameMode !== "local" && forcedValue === undefined) {
+          if (hostConnection) {
+            hostConnection.send({ type: "roll", value });
+          } else {
+            clientConnections.forEach((client) => {
+              client.conn.send({ type: "roll", value });
+            });
+          }
         }
 
         set({
@@ -257,7 +453,6 @@ export const useGameStore = create<GameState>((set, get) => {
 
         get().addLog(`${currentTurn.toUpperCase()} rolled a ${value}`);
 
-        // Handle consecutive 6s skip turn
         let nextRollCount = 0;
         if (value === 6) {
           nextRollCount = get().rollCount + 1;
@@ -266,7 +461,7 @@ export const useGameStore = create<GameState>((set, get) => {
             get().addLog(`${currentTurn.toUpperCase()} rolled three 6s in a row! Turn skipped.`);
             set({
               rollCount: 0,
-              currentTurn: nextTurn(currentTurn),
+              currentTurn: getNextActiveTurn(currentTurn, gameMode, connectedPlayers),
               diceState: "idle",
             });
             return;
@@ -275,15 +470,13 @@ export const useGameStore = create<GameState>((set, get) => {
           set({ rollCount: 0 });
         }
 
-        // Check valid moves
-        const validMoves = getValidMoves(players, currentTurn, value);
+        const validMoves = getValidMoves(get().players, currentTurn, value);
 
         if (validMoves.length === 0) {
           get().addLog(`${currentTurn.toUpperCase()} has no valid moves.`);
-          // Delay auto turn pass so player can see the roll
           setTimeout(() => {
             set({
-              currentTurn: nextTurn(currentTurn),
+              currentTurn: getNextActiveTurn(currentTurn, gameMode, connectedPlayers),
               diceState: "idle",
               rollCount: 0,
             });
@@ -300,37 +493,36 @@ export const useGameStore = create<GameState>((set, get) => {
         diceState,
         myColor,
         gameMode,
-        socket,
-        roomCode,
         isMovingPiece,
+        connectedPlayers,
       } = get();
 
-      // Validation checks
       if (diceState !== "rolled" || isMovingPiece) return;
 
-      // Check client's turn in multiplayer
       if (gameMode !== "local" && myColor !== currentTurn && !isRemote) {
         return;
       }
 
-      // Confirm piece belongs to current player
       const activePlayer = players.find((p) => p.color === currentTurn);
       const piece = activePlayer?.pieces.find((p) => p.id === pieceId);
       if (!piece || piece.finished) return;
 
-      // Verify the move is valid
       const validMoves = getValidMoves(players, currentTurn, diceValue);
       if (!validMoves.includes(pieceId)) return;
 
-      // If it's a local move in multiplayer, broadcast it
-      if (gameMode !== "local" && !isRemote && socket && roomCode) {
-        socket.emit("move", { roomCode, pieceId });
+      // Broadcast move if initiated locally
+      if (gameMode !== "local" && !isRemote) {
+        if (hostConnection) {
+          hostConnection.send({ type: "move", pieceId });
+        } else {
+          clientConnections.forEach((client) => {
+            client.conn.send({ type: "move", pieceId });
+          });
+        }
       }
 
-      // Lock controls for step-by-step transition
       set({ isMovingPiece: true });
 
-      // Determine step sequence
       const startPos = piece.position;
       const targetPos = startPos === -1 ? 0 : startPos + diceValue;
 
@@ -343,9 +535,7 @@ export const useGameStore = create<GameState>((set, get) => {
         }
       }
 
-      // Step-by-step position incrementing
       for (const stepPos of steps) {
-        // Wait 200ms per step
         await new Promise((resolve) => setTimeout(resolve, 200));
 
         set((state) => ({
@@ -370,19 +560,15 @@ export const useGameStore = create<GameState>((set, get) => {
         }));
       }
 
-      // Movement finished, run landing effects
       let landedOnFinish = targetPos === 56;
       let hasCaptured = false;
 
-      // Fetch the latest state of players after walking completed
       const midMovePlayers = get().players;
 
-      // Capture checks on final position (only outer track positions 0..50)
       const finalPlayers = midMovePlayers.map((player) => {
-        if (player.color === currentTurn) return player; // Cannot capture own piece
+        if (player.color === currentTurn) return player;
 
         const updatedPieces = player.pieces.map((p) => {
-          // Both pieces must be on the outer track (0..50) to allow capturing
           if (targetPos < 0 || targetPos > 50 || p.position < 0 || p.position > 50) {
             return p;
           }
@@ -400,7 +586,7 @@ export const useGameStore = create<GameState>((set, get) => {
             get().addLog(
               `${currentTurn.toUpperCase()} captured ${player.color.toUpperCase()}'s piece!`
             );
-            return { ...p, position: -1, finished: false }; // Send opponent home
+            return { ...p, position: -1, finished: false };
           }
           return p;
         });
@@ -408,10 +594,8 @@ export const useGameStore = create<GameState>((set, get) => {
         return { ...player, pieces: updatedPieces };
       });
 
-      // Update state with final players (captures applied)
       set({ players: finalPlayers });
 
-      // Check win condition
       const movingPlayer = finalPlayers.find((p) => p.color === currentTurn)!;
       const didWin = movingPlayer.pieces.every((p) => p.finished);
 
@@ -430,14 +614,13 @@ export const useGameStore = create<GameState>((set, get) => {
         return;
       }
 
-      // Determine next turn: roll again if 6, captured enemy, or landed on finish
       const getsExtraRoll = diceValue === 6 || hasCaptured || landedOnFinish;
 
       set({
         diceState: "idle",
         rollCount: getsExtraRoll && diceValue === 6 ? get().rollCount : 0,
-        currentTurn: getsExtraRoll ? currentTurn : nextTurn(currentTurn),
-        isMovingPiece: false, // Unlock controls
+        currentTurn: getsExtraRoll ? currentTurn : getNextActiveTurn(currentTurn, gameMode, connectedPlayers),
+        isMovingPiece: false,
       });
     },
 

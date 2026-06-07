@@ -19,7 +19,6 @@ export default function GameRoom({ params }: Props) {
   const [copied, setCopied] = useState(false);
 
   const {
-    socket,
     roomCode,
     myColor,
     myId,
@@ -29,31 +28,25 @@ export default function GameRoom({ params }: Props) {
     currentTurn,
     history,
     winner,
-    initGame,
-    joinFriendRoom,
+    connectRoom,
     chooseColor,
     startGame,
     resetGame,
   } = useGameStore();
 
-  // If the user lands here directly (e.g. via direct URL), initialize connection
   useEffect(() => {
-    if (!socket) {
-      initGame("friends");
+    if (!myId) {
+      connectRoom(code);
     }
-  }, [socket, initGame]);
-
-  // Once socket is ready and we aren't in a room yet, send join room request
-  useEffect(() => {
-    if (socket && !roomCode) {
-      joinFriendRoom(code);
-    }
-  }, [socket, roomCode, code, joinFriendRoom]);
+  }, [myId, code, connectRoom]);
 
   const copyRoomCode = () => {
-    navigator.clipboard.writeText(code);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    if (typeof window !== "undefined") {
+      const inviteUrl = `${window.location.origin}/room/${code}`;
+      navigator.clipboard.writeText(inviteUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
   };
 
   const handleExit = () => {
@@ -155,12 +148,12 @@ export default function GameRoom({ params }: Props) {
               {copied ? (
                 <>
                   <Check className="w-3.5 h-3.5 text-green-400" />
-                  <span className="text-green-400">Copied!</span>
+                  <span className="text-green-400">Link Copied!</span>
                 </>
               ) : (
                 <>
                   <Copy className="w-3.5 h-3.5" />
-                  <span>Copy Code</span>
+                  <span>Copy Invite Link</span>
                 </>
               )}
             </motion.button>
