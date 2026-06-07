@@ -16,7 +16,8 @@ export default function GameRoom({ params }: Props) {
   // Unwrap params using React.use() to support Next.js 16 App Router
   const { code } = use(params);
   const router = useRouter();
-  const [copied, setCopied] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
+  const [copiedCode, setCopiedCode] = useState(false);
 
   const {
     roomCode,
@@ -40,13 +41,19 @@ export default function GameRoom({ params }: Props) {
     }
   }, [myId, code, connectRoom]);
 
-  const copyRoomCode = () => {
+  const copyRoomLink = () => {
     if (typeof window !== "undefined") {
       const inviteUrl = `${window.location.origin}/room/${code}`;
       navigator.clipboard.writeText(inviteUrl);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      setCopiedLink(true);
+      setTimeout(() => setCopiedLink(false), 2000);
     }
+  };
+
+  const copyRoomCodeOnly = () => {
+    navigator.clipboard.writeText(code);
+    setCopiedCode(true);
+    setTimeout(() => setCopiedCode(false), 2000);
   };
 
   const handleExit = () => {
@@ -131,32 +138,59 @@ export default function GameRoom({ params }: Props) {
               <Users className="w-7 h-7 animate-pulse" />
             </div>
             <h1 className="text-3xl font-black text-white font-fredoka uppercase tracking-wider">Waiting for Players</h1>
-            <p className="text-slate-400 text-xs mt-1.5 font-medium leading-relaxed">
-              Share the code below with your friends to play!
+             <p className="text-slate-400 text-xs mt-1.5 font-medium leading-relaxed">
+              Share the link or code below with your friends to play!
             </p>
           </div>
 
-          {/* Copy Code Box */}
-          <div className="w-full flex items-center justify-between bg-slate-950/60 border-2 border-slate-800 rounded-xl p-3.5 pl-6 font-mono shadow-inner">
-            <span className="text-xl font-black text-white tracking-widest uppercase">{code}</span>
-            <motion.button
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
-              onClick={copyRoomCode}
-              className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 py-2.5 px-4 rounded-lg text-xs font-bold transition cursor-pointer shadow-md"
-            >
-              {copied ? (
-                <>
-                  <Check className="w-3.5 h-3.5 text-green-400" />
-                  <span className="text-green-400">Link Copied!</span>
-                </>
-              ) : (
-                <>
-                  <Copy className="w-3.5 h-3.5" />
-                  <span>Copy Invite Link</span>
-                </>
-              )}
-            </motion.button>
+          {/* Copy Box */}
+          <div className="w-full flex flex-col gap-3 bg-slate-950/60 border-2 border-slate-800 rounded-2xl p-4 shadow-inner">
+            <div className="flex items-center justify-between w-full px-1">
+              <span className="text-slate-400 text-xs font-bold uppercase tracking-wider pl-1">Room Code</span>
+              <span className="text-2xl font-black text-white tracking-widest uppercase font-mono">{code}</span>
+            </div>
+            
+            <div className="flex gap-2 w-full mt-1">
+              {/* Copy Invite Link */}
+              <motion.button
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+                onClick={copyRoomLink}
+                className="flex-1 flex items-center justify-center gap-1.5 bg-slate-850 hover:bg-slate-750 border border-slate-700/50 text-slate-200 py-2.5 px-3 rounded-xl text-xs font-bold transition cursor-pointer shadow-md"
+              >
+                {copiedLink ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 text-green-400" />
+                    <span className="text-green-400 font-fredoka">Link Copied!</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3.5 h-3.5 text-slate-400" />
+                    <span>Copy Link</span>
+                  </>
+                )}
+              </motion.button>
+
+              {/* Copy Code Only */}
+              <motion.button
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+                onClick={copyRoomCodeOnly}
+                className="flex-1 flex items-center justify-center gap-1.5 bg-slate-850 hover:bg-slate-750 border border-slate-700/50 text-slate-200 py-2.5 px-3 rounded-xl text-xs font-bold transition cursor-pointer shadow-md"
+              >
+                {copiedCode ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 text-green-400" />
+                    <span className="text-green-400 font-fredoka">Code Copied!</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3.5 h-3.5 text-slate-400" />
+                    <span>Copy Code</span>
+                  </>
+                )}
+              </motion.button>
+            </div>
           </div>
 
           {/* Connected players list / Seat Choice */}
@@ -278,8 +312,8 @@ export default function GameRoom({ params }: Props) {
                 <h2 className="text-lg font-black text-white font-fredoka uppercase tracking-tight">Room Active</h2>
                 <div className="flex items-center gap-1.5 mt-0.5">
                   <span className="text-slate-400 text-xs font-mono">Code: {code}</span>
-                  <button onClick={copyRoomCode} className="text-slate-400 hover:text-white transition cursor-pointer">
-                    {copied ? <Check className="w-3.5 h-3.5 text-green-400" /> : <Copy className="w-3 h-3" />}
+                  <button onClick={copyRoomLink} className="text-slate-400 hover:text-white transition cursor-pointer">
+                    {copiedLink ? <Check className="w-3.5 h-3.5 text-green-400" /> : <Copy className="w-3 h-3" />}
                   </button>
                 </div>
               </div>
